@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image name
+        run: |
+          IMAGE_NAME="$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE_NAME=${IMAGE_NAME}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
+
+      - name: Run container
+        run: |
+          docker rm -f ai-image-classifier-ci 2>/dev/null || true
+          docker run -d --name ai-image-classifier-ci -p 8000:8000 "${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Wait for app
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/ >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker logs ai-image-classifier-ci
+          exit 1
+
+      - name: Smoke test
+        run: bash xlabs-work/smoke-test.sh http://localhost:8000
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-evidence
+          path: |
+            /tmp/ai-image-classifier-home.html
+            /tmp/ai-image-classifier-predict-response.json
+
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push tested image
+        run: docker push "${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ai-image-classifier-ci 2>/dev/null || true
