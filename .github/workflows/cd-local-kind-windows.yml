@@ -1,24 +1,19 @@
 name: Automatic CD Local Kind Windows
-
 on:
   workflow_run:
     workflows: ["CI"]
     types:
       - completed
-
 permissions:
   contents: read
   packages: read
-
 defaults:
   run:
     shell: powershell
-
 jobs:
   deploy-local-kind:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: self-hosted
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,7 +35,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull tested image
-        run: docker pull $env:IMAGE
+        run: docker pull --platform linux/amd64 $env:IMAGE
 
       - name: Ensure Kind cluster exists
         run: |
@@ -52,7 +47,10 @@ jobs:
           kubectl get nodes
 
       - name: Load image into Kind
-        run: kind load docker-image $env:IMAGE --name xlabs-projects
+        run: |
+          docker save $env:IMAGE -o image.tar
+          kind load image-archive image.tar --name xlabs-projects
+          Remove-Item image.tar
 
       - name: Deploy manifests
         run: |
@@ -64,13 +62,9 @@ jobs:
         if: always()
         run: |
           New-Item -ItemType Directory -Force -Path xlabs-work/evidence | Out-Null
-
           cmd.exe /c "kubectl get deploy,pods,svc -l app=ai-image-classifier -o wide > xlabs-work\evidence\k8s-resources.txt 2>&1"
-
           cmd.exe /c "kubectl logs deployment/ai-image-classifier --tail=120 > xlabs-work\evidence\k8s-logs.txt 2>&1"
-
           cmd.exe /c "kubectl get events --sort-by=.lastTimestamp > xlabs-work\evidence\k8s-events.txt 2>&1"
-
           exit 0
 
       - name: Upload Kubernetes evidence
