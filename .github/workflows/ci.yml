@@ -1,75 +1,87 @@
-name: CI
+name: CI Windows
+
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+
 permissions:
   contents: read
   packages: write
+
+defaults:
+  run:
+    shell: powershell
+
 jobs:
   build-and-smoke-test:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set image name
         run: |
-          IMAGE_NAME="$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
-          echo "IMAGE_NAME=${IMAGE_NAME}" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          $ImageName = "ghcr.io/${{ github.repository }}".ToLowerInvariant()
+          $ImageTag = "${{ github.sha }}"
+          "IMAGE=$($ImageName):$ImageTag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "Building image $($ImageName):$ImageTag"
 
       - name: Build image
-        run: |
-          docker buildx build \
-            --provenance=false \
-            --sbom=false \
-            --load \
-            -t "${IMAGE_NAME}:${IMAGE_TAG}" .
+        run: docker build -t $env:IMAGE .
 
       - name: Run container
         run: |
-          docker rm -f ai-image-classifier-ci 2>/dev/null || true
-          docker run -d --name ai-image-classifier-ci -p 8000:8000 "${IMAGE_NAME}:${IMAGE_TAG}"
+          $existingContainer = docker ps -aq -f "name=^ai-image-classifier-ci$"
+          if ($existingContainer) {
+            docker rm -f ai-image-classifier-ci
+          }
+          docker run -d --name ai-image-classifier-ci -p 8000:8000 $env:IMAGE
 
       - name: Wait for app
         run: |
-          for i in {1..30}; do
-            if curl -fsS http://localhost:8000/ >/dev/null; then
+          for ($i = 1; $i -le 30; $i++) {
+            try {
+              Invoke-WebRequest -Uri http://localhost:8000/ -UseBasicParsing -ErrorAction Stop | Out-Null
               exit 0
-            fi
-            sleep 5
-          done
+            } catch {
+              Start-Sleep -Seconds 5
+            }
+          }
           docker logs ai-image-classifier-ci
           exit 1
 
       - name: Smoke test
-        run: bash xlabs-work/smoke-test.sh http://localhost:8000
+        run: |
+          New-Item -ItemType Directory -Force -Path xlabs-work/evidence | Out-Null
+          Invoke-WebRequest -Uri http://localhost:8000/ -UseBasicParsing -OutFile xlabs-work/evidence/home.html
+          curl.exe -fsS -X POST http://localhost:8000/predict -F "file=@test_data/sample_cat.png" -o xlabs-work/evidence/predict-response.json
+          Select-String -Path xlabs-work/evidence/predict-response.json -Pattern '"class"'
 
       - name: Upload smoke evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-test-evidence
-          path: |
-            /tmp/ai-image-classifier-home.html
-            /tmp/ai-image-classifier-predict-response.json
-
-      - name: Verify image manifest is single-platform
-        run: |
-          docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" 2>/dev/null || true
-          docker inspect "${IMAGE_NAME}:${IMAGE_TAG}" --format='{{.Os}}/{{.Architecture}}'
+          path: xlabs-work/evidence/
 
       - name: Login to GitHub Container Registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push tested image
-        run: docker push "${IMAGE_NAME}:${IMAGE_TAG}"
+        run: docker push $env:IMAGE
 
       - name: Cleanup
         if: always()
-        run: docker rm -f ai-image-classifier-ci 2>/dev/null || true
+        run: |
+          $existingContainer = docker ps -aq -f "name=^ai-image-classifier-ci$"
+          if ($existingContainer) {
+            docker rm -f ai-image-classifier-ci
+          }
+          exit 0
